@@ -1,0 +1,194 @@
+# main.py - complete replacement
+
+import os
+import torch
+import pandas as pd
+from dataPipeline.ingester import fetch_chembl_peptides, fetch_canonical_baselines
+from dataPipeline.augmenter import run_augmentation_pipeline
+from tokenizer.tokenizer import SmilesBPETokenizer
+from train.dataset import MolecularTripletDataset
+from train.train import run_training , evaluate
+from model.config import load_model_config, TRAINING_CONFIG
+from dataPipeline.validate import validate_pipeline_data
+
+
+# ── Data cache paths ────────────────────────────────────────────────────
+AUGMENTED_CACHE  = "./cache/augmented_targets.csv"
+CANONICAL_CACHE  = "./cache/canonical_baselines.csv"
+TRAIN_SPLIT      = "./cache/train.csv"
+VAL_SPLIT        = "./cache/val.csv"
+TEST_SPLIT       = "./cache/test.csv"
+
+
+def build_or_load_data(force_rebuild: bool = False):
+    """
+    Builds the full dataset once and caches it to disk.
+    Subsequent runs load from cache - no API calls needed.
+    """
+    os.makedirs("./cache", exist_ok=True)
+
+    if (not force_rebuild
+            and os.path.exists(TRAIN_SPLIT)
+            and os.path.exists(VAL_SPLIT)
+            and os.path.exists(TEST_SPLIT)):
+        print("Loading cached splits...")
+        return (
+            pd.read_csv(TRAIN_SPLIT),
+            pd.read_csv(VAL_SPLIT),
+            pd.read_csv(TEST_SPLIT),
+        )
+
+    # ── Fetch ────────────────────────────────────────────────────────────
+    print("[1/4] Ingesting ChEMBL peptides...")
+    # Pull more - augmentation will expand this
+    raw_target_df = fetch_chembl_peptides(limit=1000)
+
+    print("[2/4] Augmenting targets...")
+    augmented_df  = run_augmentation_pipeline(raw_target_df, pos_factor=5)
+
+    print("[3/4] Ingesting UniProt canonicals...")
+    # Match or exceed augmented target count for balanced in-batch negatives
+    canonical_df  = fetch_canonical_baselines(limit=500)
+
+    augmented_df.to_csv(AUGMENTED_CACHE, index=False)
+    canonical_df.to_csv(CANONICAL_CACHE, index=False)
+
+    # ── Diagnostic check ─────────────────────────────────────────────────
+    print("\n=== DATA AUDIT ===")
+    print(augmented_df['type'].value_counts())
+    n_anchors = (augmented_df['type'] == 'noncanonical_target').sum()
+    if n_anchors == 0:
+        raise ValueError(
+            "FATAL: Zero noncanonical_target rows in augmented dataset.\n"
+            "ChEMBL API returned no peptides. Check your internet connection\n"
+            "and run: python -c \"from dataPipeline.ingester import fetch_chembl_peptides; print(fetch_chembl_peptides(limit=5))\""
+        )
+
+    # ── Split anchors into train/val/test BEFORE augmentation lookup ──────
+    # Critical: split at the ANCHOR level, not the row level
+    # If you split rows, the same molecule appears in train and test via positives
+
+        # main.py - add after DATA AUDIT print
+    print("\n[VALIDATION] Checking data quality...")
+    val_report = validate_pipeline_data(
+        augmented_df=augmented_df,
+        canonical_df=canonical_df,
+        verbose=True,       # True for full per-molecule detail
+        )
+
+    if not val_report['overall_pass']:
+        print("\n[WARNING]  Data quality issues detected ")
+        print("Training will continue but results may be unreliable")
+
+    # ── Tokenizer ────────────────────────────────────────────────────────
+    print("\nInitializing and Training Tokenizer...")
+    tokenizer = SmilesBPETokenizer() # Initialize fresh
+    
+
+    print("\n[4/4] Building train/val/test splits...")
+    anchors = augmented_df[augmented_df['type'] == 'noncanonical_target'].copy()
+    anchors = anchors.sample(frac=1, random_state=42).reset_index(drop=True)
+
+    n       = len(anchors)
+    n_train = int(n * 0.80)
+    n_val   = int(n * 0.15)
+    # test gets the remainder
+
+    train_ids = set(anchors.iloc[:n_train]['id'])
+    val_ids   = set(anchors.iloc[n_train:n_train + n_val]['id'])
+    test_ids  = set(anchors.iloc[n_train + n_val:]['id'])
+
+    def get_split_df(anchor_ids: set, augmented_df, canonical_df) -> pd.DataFrame:
+        """
+        Returns all rows belonging to this split:
+        - anchor rows with id in anchor_ids
+        - positive/negative rows with anchor_id in anchor_ids
+        - canonical baselines (shared across splits - they are background negatives)
+        """
+        mask_anchor = (
+            (augmented_df['type'] == 'noncanonical_target') &
+            (augmented_df['id'].isin(anchor_ids))
+        )
+        mask_aug = (
+            (augmented_df['type'].isin(['positive_pair', 'hard_negative_pair'])) &
+            (augmented_df['anchor_id'].isin(anchor_ids))
+        )
+        split_aug = augmented_df[mask_anchor | mask_aug].copy()
+        return pd.concat([split_aug, canonical_df], ignore_index=True)
+
+    train_df = get_split_df(train_ids, augmented_df, canonical_df)
+    val_df   = get_split_df(val_ids,   augmented_df, canonical_df)
+    test_df  = get_split_df(test_ids,  augmented_df, canonical_df)
+
+    train_df.to_csv(TRAIN_SPLIT, index=False)
+    val_df.to_csv(VAL_SPLIT,   index=False)
+    test_df.to_csv(TEST_SPLIT,  index=False)
+
+    print(f"\nSplit sizes (anchor molecules):")
+    print(f"  Train : {len(train_ids)} anchors -> {len(train_df)} total rows")
+    print(f"  Val   : {len(val_ids)} anchors -> {len(val_df)} total rows")
+    print(f"  Test  : {len(test_ids)} anchors -> {len(test_df)} total rows")
+
+    return train_df, val_df, test_df
+
+
+def main():
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"=== NCAA SCREENING ENGINE - {device.upper()} ===\n")
+
+    # ── Data ─────────────────────────────────────────────────────────────
+    train_df, val_df, test_df = build_or_load_data(force_rebuild=True)
+
+    # ── Tokenizer ────────────────────────────────────────────────────────
+    print("\nLoading tokenizer...")
+    tokenizer = SmilesBPETokenizer(pretrained_path="./ncaa_tokenizer")
+
+    # ── Datasets ─────────────────────────────────────────────────────────
+    canonical_df = pd.read_csv(CANONICAL_CACHE)
+
+    train_dataset = MolecularTripletDataset(
+        augmented_df=train_df,
+        canonical_df=canonical_df,
+        tokenizer=tokenizer,
+        max_length=256,      # ← increased from 128, see Fix 3
+    )
+    val_dataset = MolecularTripletDataset(
+        augmented_df=val_df,
+        canonical_df=canonical_df,
+        tokenizer=tokenizer,
+        max_length=256,
+    )
+
+    print(f"\nTrain triplets : {len(train_dataset)}")
+    print(f"Val triplets   : {len(val_dataset)}")
+
+    if len(train_dataset) == 0:
+        raise ValueError(
+            "Training dataset is empty.\n"
+            "Run with force_rebuild=True and check ChEMBL API response."
+        )
+
+    # ── Training ──────────────────────────────────────────────────────────
+    model = run_training(
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        device=device,
+        tokenizer_path="./ncaa_tokenizer",
+    )
+
+    # ── Final Test Evaluation ─────────────────────────────────────────────
+    print("\n=== FINAL TEST EVALUATION ===")
+    test_dataset = MolecularTripletDataset(
+        augmented_df=test_df,
+        canonical_df=canonical_df,
+        tokenizer=tokenizer,
+        max_length=256,
+    )
+    evaluate(model, test_dataset, device, label="TEST")
+
+    torch.save(model.state_dict(), "ncaa_encoder_final.pt")
+    print("\n[OK] Model saved to ncaa_encoder_final.pt")
+
+
+if __name__ == "__main__":
+    main()
