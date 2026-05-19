@@ -353,41 +353,65 @@ def fetch_canonical_baselines(limit: int = 200) -> pd.DataFrame:
     """
     import requests
     print(f"Fetching {limit} canonical peptides from UniProt...")
+    base_url = "https://rest.uniprot.org/uniprotkb/search"
 
-    url = (
-        f"https://rest.uniprot.org/uniprotkb/search"
-        f"?query=(length:[5 TO 20])&size={limit}&format=json"
-    )
-
-    response = requests.get(url, timeout=30)
-    if response.status_code != 200:
-        raise Exception(f"UniProt API failed: {response.status_code}")
-
-    data = response.json()
     rows = []
+    offset = 0
+    page_size = min(500, max(1, limit))  # UniProt search API max size is 500
 
-    for item in data['results']:
-        uid      = item['primaryAccession']
-        sequence = item['sequence']['value']
+    while len(rows) < limit:
+        params = {
+            'query': '(length:[5 TO 20])',
+            'format': 'json',
+            'size': page_size,
+            'offset': offset,
+        }
 
-        mol = Chem.MolFromSequence(sequence)
-        if not mol:
-            print(f"  [WARN] RDKit failed on {uid}: {sequence[:15]}...")
-            continue
+        response = requests.get(base_url, params=params, timeout=30)
+        if response.status_code != 200:
+            raise Exception(f"UniProt API failed: {response.status_code}")
 
-        try:
-            Chem.SanitizeMol(mol)
-            smiles = Chem.MolToSmiles(mol)
-            rows.append({
-                'id':        f"uniprot_{uid}",
-                'smiles':    smiles,
-                'type':      'canonical_baseline',
-                'anchor_id': None,
-            })
-        except Exception as e:
-            print(f"  [WARN] Sanitization failed on {uid}: {e}")
-            continue
+        data = response.json()
+        results = data.get('results', [])
+        if not results:
+            break
 
+        for item in results:
+            uid = item.get('primaryAccession')
+            seq = item.get('sequence', {}).get('value')
+            if not seq or not uid:
+                continue
+
+            mol = Chem.MolFromSequence(seq)
+            if not mol:
+                print(f"  [WARN] RDKit failed on {uid}: {seq[:15]}...")
+                continue
+
+            try:
+                Chem.SanitizeMol(mol)
+                smiles = Chem.MolToSmiles(mol)
+                rows.append({
+                    'id':        f"uniprot_{uid}",
+                    'smiles':    smiles,
+                    'type':      'canonical_baseline',
+                    'anchor_id': None,
+                })
+            except Exception as e:
+                print(f"  [WARN] Sanitization failed on {uid}: {e}")
+                continue
+
+        offset += page_size
+
+        # Defensive: avoid infinite loops in case API misbehaves
+        if offset > 1000000:
+            print("  [WARN] Offset exceeded safety limit; stopping pagination")
+            break
+
+    # Trim to requested limit and deduplicate
     df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.drop_duplicates(subset=['smiles'], keep='first').reset_index(drop=True)
+        df = df.iloc[:limit].reset_index(drop=True)
+
     print(f"UniProt returned {len(df)} canonical baselines")
     return df
