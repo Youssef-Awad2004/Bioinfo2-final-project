@@ -11,6 +11,7 @@ from torch.utils.data import Dataset
 from rdkit import Chem
 from rdkit.Chem import DataStructs, rdFingerprintGenerator
 from model.physiochemical import PhysicochemicalBiasComputer
+from dataPipeline.precompute_physics import ExactPhysicsLookup
 
 
 class MolecularTripletDataset(Dataset):
@@ -38,8 +39,8 @@ class MolecularTripletDataset(Dataset):
             radius=2,
             fpSize=2048,
         )
-        self.triplets       = self._build_triplets(augmented_df)
-        self.physics = PhysicsLookup(physics_lookup, max_length)
+        self.triplets = self._build_triplets(augmented_df)
+        self.physics = ExactPhysicsLookup(physics_cache, max_length)
 
     def _sample_background_negative(self, anchor_smiles: str, max_attempts: int = 50) -> str:
         """
@@ -93,20 +94,13 @@ class MolecularTripletDataset(Dataset):
         print(f"Built {len(triplets)} valid triplets from dataset")
         return triplets
 
-    def _encode_one(self, smiles: str) -> dict[str, torch.Tensor]:
-        T = self.max_length
-
+    def _encode_one(self, smiles: str) -> dict:
         token_ids = torch.tensor(
-            self.tokenizer.encode_smiles(smiles, max_length=T),
+            self.tokenizer.encode_smiles(smiles, max_length=self.max_length),
             dtype=torch.long
         )
-
-        # LOOKUP instead of recompute — the key speedup
-        P_e, P_s = self.physics.get(
-            smiles,
-            token_ids.tolist(),
-            self.tokenizer
-        )
+        # Single dictionary lookup — zero RDKit
+        P_e, P_s = self.physics.get(smiles)
 
         return {
             'token_ids': token_ids,
