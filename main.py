@@ -145,7 +145,7 @@ def main():
 
     # ── Physics cache ────────────────────────────────────────────────────
     print("\nPrecomputing physics matrices...")
-    physics_cache = build_exact_physics_cache(
+    physics_index, tensor_dir = build_exact_physics_cache(
         df=all_data,
         tokenizer=tokenizer.tokenizer,
         max_length=256,
@@ -153,7 +153,7 @@ def main():
         cache_path='./cache/physics_cache_exact.pkl',
         force_rebuild=False,
     )
-    physics_lookup = ExactPhysicsLookup(physics_cache, max_length=256)
+    physics_lookup = ExactPhysicsLookup(physics_index, tensor_dir, max_length=256)
 
     # ── Datasets ─────────────────────────────────────────────────────────
     canonical_df = pd.read_csv(CANONICAL_CACHE)

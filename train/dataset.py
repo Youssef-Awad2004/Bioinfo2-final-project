@@ -10,7 +10,6 @@ import torch
 from torch.utils.data import Dataset
 from rdkit import Chem
 from rdkit.Chem import DataStructs, rdFingerprintGenerator
-from model.physiochemical import PhysicochemicalBiasComputer
 from dataPipeline.precompute_physics import ExactPhysicsLookup
 
 
@@ -28,19 +27,18 @@ class MolecularTripletDataset(Dataset):
         augmented_df,
         canonical_df,
         tokenizer,
-        physics_lookup: dict,
+        physics_lookup: ExactPhysicsLookup,
         max_length: int = 128,
     ):
         self.tokenizer      = tokenizer
         self.max_length     = max_length
-        self.physics        = PhysicochemicalBiasComputer()
         self.canonical_pool = canonical_df['smiles'].dropna().tolist()
         self._morgan_generator = rdFingerprintGenerator.GetMorganGenerator(
             radius=2,
             fpSize=2048,
         )
         self.triplets = self._build_triplets(augmented_df)
-        self.physics = ExactPhysicsLookup(physics_lookup, max_length)
+        self.physics = physics_lookup
 
     def _sample_background_negative(self, anchor_smiles: str, max_attempts: int = 50) -> str:
         """
