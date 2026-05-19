@@ -10,7 +10,7 @@ from train.dataset import MolecularTripletDataset
 from train.train import run_training , evaluate
 from model.config import load_model_config, TRAINING_CONFIG
 from dataPipeline.validate import validate_pipeline_data
-from dataPipeline.precompute_physics import ExactPhysicsLookup
+from dataPipeline.precompute_physics import ExactPhysicsLookup, build_exact_physics_cache
 
 
 
@@ -34,11 +34,11 @@ def build_or_load_data(force_rebuild: bool = False):
             and os.path.exists(VAL_SPLIT)
             and os.path.exists(TEST_SPLIT)):
         print("Loading cached splits...")
-        return (
-            pd.read_csv(TRAIN_SPLIT),
-            pd.read_csv(VAL_SPLIT),
-            pd.read_csv(TEST_SPLIT),
-        )
+        train_df = pd.read_csv(TRAIN_SPLIT)
+        val_df = pd.read_csv(VAL_SPLIT)
+        test_df = pd.read_csv(TEST_SPLIT)
+        all_data = pd.concat([train_df, val_df, test_df], ignore_index=True)
+        return train_df, val_df, test_df, all_data
 
     # ── Fetch ────────────────────────────────────────────────────────────
     print("[1/4] Ingesting ChEMBL peptides...")
@@ -82,22 +82,6 @@ def build_or_load_data(force_rebuild: bool = False):
         print("\n[WARNING]  Data quality issues detected ")
         print("Training will continue but results may be unreliable")
 
-
-    print("Precomputing physics matrices...")
-    # Build lookup from ALL data — augmented + canonical
-    all_data = pd.concat([augmented_df, canonical_df], ignore_index=True)
-    
-    physics_lookup = ExactPhysicsLookup(
-        df=all_data,
-        smiles_col='smiles',
-        cache_path='./cache/physics_lookup.pkl',
-        force_rebuild=True,   # set True if your dataset changed
-    )    
-
-    # ── Tokenizer ────────────────────────────────────────────────────────
-    print("\nInitializing and Training Tokenizer...")
-    tokenizer = SmilesBPETokenizer() # Initialize fresh
-    
 
     print("\n[4/4] Building train/val/test splits...")
     anchors = augmented_df[augmented_df['type'] == 'noncanonical_target'].copy()
@@ -143,7 +127,9 @@ def build_or_load_data(force_rebuild: bool = False):
     print(f"  Val   : {len(val_ids)} anchors -> {len(val_df)} total rows")
     print(f"  Test  : {len(test_ids)} anchors -> {len(test_df)} total rows")
 
-    return train_df, val_df, test_df , physics_lookup
+    all_data = pd.concat([augmented_df, canonical_df], ignore_index=True)
+
+    return train_df, val_df, test_df, all_data
 
 
 def main():
@@ -151,11 +137,23 @@ def main():
     print(f"=== NCAA SCREENING ENGINE - {device.upper()} ===\n")
 
     # ── Data ─────────────────────────────────────────────────────────────
-    train_df, val_df, test_df, physics_lookup = build_or_load_data(force_rebuild=True)
+    train_df, val_df, test_df, all_data = build_or_load_data(force_rebuild=True)
 
     # ── Tokenizer ────────────────────────────────────────────────────────
     print("\nLoading tokenizer...")
     tokenizer = SmilesBPETokenizer(pretrained_path="./ncaa_tokenizer")
+
+    # ── Physics cache ────────────────────────────────────────────────────
+    print("\nPrecomputing physics matrices...")
+    physics_cache = build_exact_physics_cache(
+        df=all_data,
+        tokenizer=tokenizer.tokenizer,
+        max_length=256,
+        smiles_col='smiles',
+        cache_path='./cache/physics_cache_exact.pkl',
+        force_rebuild=False,
+    )
+    physics_lookup = ExactPhysicsLookup(physics_cache, max_length=256)
 
     # ── Datasets ─────────────────────────────────────────────────────────
     canonical_df = pd.read_csv(CANONICAL_CACHE)
