@@ -1,6 +1,7 @@
 # main.py - complete replacement
 
 import os
+from pathlib import Path
 import torch
 import pandas as pd
 from dataPipeline.ingester import fetch_chembl_peptides, fetch_canonical_baselines
@@ -14,12 +15,26 @@ from dataPipeline.precompute_physics import ExactPhysicsLookup, build_exact_phys
 
 
 
-# ── Data cache paths ────────────────────────────────────────────────────
-AUGMENTED_CACHE  = "./cache/augmented_targets.csv"
-CANONICAL_CACHE  = "./cache/canonical_baselines.csv"
-TRAIN_SPLIT      = "./cache/train.csv"
-VAL_SPLIT        = "./cache/val.csv"
-TEST_SPLIT       = "./cache/test.csv"
+# ── Path configuration (Kaggle-compatible) ─────────────────────────────
+PROJECT_DIR = Path(__file__).resolve().parent
+KAGGLE_WORKING_DIR = Path("/kaggle/working")
+
+DEFAULT_CACHE_DIR = KAGGLE_WORKING_DIR / "cache" if KAGGLE_WORKING_DIR.exists() else PROJECT_DIR / "cache"
+CACHE_DIR = Path(os.getenv("BIOINFO_CACHE_DIR", str(DEFAULT_CACHE_DIR)))
+TOKENIZER_DIR = Path(os.getenv("BIOINFO_TOKENIZER_DIR", str(PROJECT_DIR / "ncaa_tokenizer")))
+OUTPUT_MODEL_PATH = Path(
+    os.getenv(
+        "BIOINFO_MODEL_OUT",
+        str((KAGGLE_WORKING_DIR if KAGGLE_WORKING_DIR.exists() else PROJECT_DIR) / "ncaa_encoder_final.pt"),
+    )
+)
+
+AUGMENTED_CACHE = CACHE_DIR / "augmented_targets.csv"
+CANONICAL_CACHE = CACHE_DIR / "canonical_baselines.csv"
+TRAIN_SPLIT = CACHE_DIR / "train.csv"
+VAL_SPLIT = CACHE_DIR / "val.csv"
+TEST_SPLIT = CACHE_DIR / "test.csv"
+PHYSICS_CACHE = CACHE_DIR / "physics_cache_exact.pkl"
 
 
 def build_or_load_data(force_rebuild: bool = False):
@@ -27,7 +42,7 @@ def build_or_load_data(force_rebuild: bool = False):
     Builds the full dataset once and caches it to disk.
     Subsequent runs load from cache - no API calls needed.
     """
-    os.makedirs("./cache", exist_ok=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     if (not force_rebuild
             and os.path.exists(TRAIN_SPLIT)
@@ -141,7 +156,7 @@ def main():
 
     # ── Tokenizer ────────────────────────────────────────────────────────
     print("\nLoading tokenizer...")
-    tokenizer = SmilesBPETokenizer(pretrained_path="./ncaa_tokenizer")
+    tokenizer = SmilesBPETokenizer(pretrained_path=str(TOKENIZER_DIR))
 
     # ── Physics cache ────────────────────────────────────────────────────
     print("\nPrecomputing physics matrices...")
@@ -150,7 +165,7 @@ def main():
         tokenizer=tokenizer.tokenizer,
         max_length=256,
         smiles_col='smiles',
-        cache_path='./cache/physics_cache_exact.pkl',
+        cache_path=str(PHYSICS_CACHE),
         force_rebuild=False,
     )
     physics_lookup = ExactPhysicsLookup(physics_cache, max_length=256)
@@ -187,7 +202,7 @@ def main():
         train_dataset=train_dataset,
         val_dataset=val_dataset,
         device=device,
-        tokenizer_path="./ncaa_tokenizer",
+        tokenizer_path=str(TOKENIZER_DIR),
     )
 
     # ── Final Test Evaluation ─────────────────────────────────────────────
@@ -201,8 +216,9 @@ def main():
     )
     evaluate(model, test_dataset, device, label="TEST")
 
-    torch.save(model.state_dict(), "ncaa_encoder_final.pt")
-    print("\n[OK] Model saved to ncaa_encoder_final.pt")
+    OUTPUT_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), str(OUTPUT_MODEL_PATH))
+    print(f"\n[OK] Model saved to {OUTPUT_MODEL_PATH}")
 
 
 if __name__ == "__main__":
