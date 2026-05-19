@@ -10,6 +10,8 @@ from train.dataset import MolecularTripletDataset
 from train.train import run_training , evaluate
 from model.config import load_model_config, TRAINING_CONFIG
 from dataPipeline.validate import validate_pipeline_data
+from dataPipeline.precompute_physics import build_physics_lookup
+
 
 
 # ── Data cache paths ────────────────────────────────────────────────────
@@ -80,6 +82,18 @@ def build_or_load_data(force_rebuild: bool = False):
         print("\n[WARNING]  Data quality issues detected ")
         print("Training will continue but results may be unreliable")
 
+
+    print("Precomputing physics matrices...")
+    # Build lookup from ALL data — augmented + canonical
+    all_data = pd.concat([augmented_df, canonical_df], ignore_index=True)
+    
+    physics_lookup = build_physics_lookup(
+        df=all_data,
+        smiles_col='smiles',
+        cache_path='./cache/physics_lookup.pkl',
+        force_rebuild=True,   # set True if your dataset changed
+    )    
+
     # ── Tokenizer ────────────────────────────────────────────────────────
     print("\nInitializing and Training Tokenizer...")
     tokenizer = SmilesBPETokenizer() # Initialize fresh
@@ -129,7 +143,7 @@ def build_or_load_data(force_rebuild: bool = False):
     print(f"  Val   : {len(val_ids)} anchors -> {len(val_df)} total rows")
     print(f"  Test  : {len(test_ids)} anchors -> {len(test_df)} total rows")
 
-    return train_df, val_df, test_df
+    return train_df, val_df, test_df , physics_lookup
 
 
 def main():
@@ -137,7 +151,7 @@ def main():
     print(f"=== NCAA SCREENING ENGINE - {device.upper()} ===\n")
 
     # ── Data ─────────────────────────────────────────────────────────────
-    train_df, val_df, test_df = build_or_load_data(force_rebuild=True)
+    train_df, val_df, test_df, physics_lookup = build_or_load_data(force_rebuild=True)
 
     # ── Tokenizer ────────────────────────────────────────────────────────
     print("\nLoading tokenizer...")
@@ -150,12 +164,14 @@ def main():
         augmented_df=train_df,
         canonical_df=canonical_df,
         tokenizer=tokenizer,
+        physics_lookup=physics_lookup,
         max_length=256,      # ← increased from 128, see Fix 3
     )
     val_dataset = MolecularTripletDataset(
         augmented_df=val_df,
         canonical_df=canonical_df,
         tokenizer=tokenizer,
+        physics_lookup=physics_lookup,
         max_length=256,
     )
 
@@ -183,6 +199,7 @@ def main():
         canonical_df=canonical_df,
         tokenizer=tokenizer,
         max_length=256,
+        physics_lookup=physics_lookup,
     )
     evaluate(model, test_dataset, device, label="TEST")
 

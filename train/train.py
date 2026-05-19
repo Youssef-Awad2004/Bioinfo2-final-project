@@ -1,13 +1,14 @@
 # train/trainer.py
 import os
 import sys
+from contextlib import nullcontext
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 import torch
-from torch.utils.data import DataLoader
+import torch.nn.functional as F
 from model.encoder import NcAATransformerEncoder
 from model.weight_transfer import transfer_chemberta_weights
 from train.loss import AnnealedInfoNCE
@@ -60,8 +61,11 @@ def train_epoch(model, loader, optimizer, loss_fn, device):
     total_loss  = 0
     total_steps = 0
 
+    use_amp = torch.cuda.is_available() and str(device).startswith('cuda')
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+
     for batch in loader:
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
         def encode_role(role):
             ids = batch[role]['token_ids'].to(device)
@@ -70,18 +74,23 @@ def train_epoch(model, loader, optimizer, loss_fn, device):
             return model(ids, P_electro=P_e, P_steric=P_s,
                         return_projection=True)['projection']
 
-        z_a  = encode_role('anchor')
-        z_p  = encode_role('positive')
-        z_hn = encode_role('hard_neg')
-        z_bg = encode_role('bg_neg')
+        autocast_ctx = torch.autocast('cuda') if use_amp else nullcontext()
+
+        with autocast_ctx:
+            z_a  = encode_role('anchor')
+            z_p  = encode_role('positive')
+            z_hn = encode_role('hard_neg')
+            z_bg = encode_role('bg_neg')
 
         loss, metrics = loss_fn(z_a, z_p, z_hn, z_bg)
-        loss.backward()
+        scaler.scale(loss).backward()
 
+        scaler.unscale_(optimizer)
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         if grad_norm > 1.0:
             print(f" Gradient clipped: {grad_norm:.2f} → 1.0")
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
 
         total_loss  += metrics['loss']
         total_steps += 1
@@ -116,12 +125,6 @@ def collate_triplets(batch):
         'bg_neg':   stack_role('bg_neg'),
     }
 
-
-
-# Add to train/train.py
-
-import torch.nn.functional as F
-
 def evaluate(model, dataset, device, label="VAL") -> dict:
     """
     Evaluation metrics for contrastive molecular encoder.
@@ -143,14 +146,13 @@ def evaluate(model, dataset, device, label="VAL") -> dict:
     A large gap means your model correctly separates pharmacophore
     matches from decoys. This is the core scientific claim.
     """
-    from torch.utils.data import DataLoader
     from train.loss import AnnealedInfoNCE
 
     model.eval()
     loss_fn = AnnealedInfoNCE(tau_max=0.07, tau_min=0.07, anneal_steps=1)
     # Fixed tau at minimum for evaluation — no annealing during eval
 
-    loader = DataLoader(
+    loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=8,
         shuffle=False,
@@ -164,20 +166,26 @@ def evaluate(model, dataset, device, label="VAL") -> dict:
     total_discrim     = 0   # anchor · hard_neg cosine sim (want LOW)
     total_steps       = 0
 
-    with torch.no_grad():
+    use_amp = torch.cuda.is_available() and str(device).startswith('cuda')
+    autocast_ctx = torch.autocast('cuda') if use_amp else nullcontext()
+
+    with torch.inference_mode():
         for batch in loader:
             def get_fingerprint(role):
                 ids = batch[role]['token_ids'].to(device)
                 P_e = batch[role]['P_electro'].to(device)
                 P_s = batch[role]['P_steric'].to(device)
-                return F.normalize(
-                    model(ids, P_electro=P_e, P_steric=P_s,
-                         return_projection=True)['projection'],
-                    dim=-1
-                )
+                with autocast_ctx:
+                    projection = model(
+                        ids,
+                        P_electro=P_e,
+                        P_steric=P_s,
+                        return_projection=True,
+                    )['projection']
+                return F.normalize(projection, dim=-1)
 
-            z_a  = get_fingerprint('anchor')
-            z_p  = get_fingerprint('positive')
+            z_a = get_fingerprint('anchor')
+            z_p = get_fingerprint('positive')
             z_hn = get_fingerprint('hard_neg')
             z_bg = get_fingerprint('bg_neg')
 
@@ -212,8 +220,6 @@ def evaluate(model, dataset, device, label="VAL") -> dict:
 
     return results
 
-# train/train.py — add early stopping to run_training
-
 def run_training(train_dataset, val_dataset, device='cpu',
                  tokenizer_path="./ncaa_tokenizer"):
     model_config = load_model_config(tokenizer_path)
@@ -246,7 +252,8 @@ def run_training(train_dataset, val_dataset, device='cpu',
         batch_size=TRAINING_CONFIG['batch_size'],
         shuffle=True,
         drop_last=True,
-        num_workers=0,
+        num_workers=8,        # Use multiple CPU cores to build batches simultaneously!
+        pin_memory=True,
         collate_fn=collate_triplets,
     )
 

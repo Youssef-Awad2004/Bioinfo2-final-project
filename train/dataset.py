@@ -27,6 +27,7 @@ class MolecularTripletDataset(Dataset):
         augmented_df,
         canonical_df,
         tokenizer,
+        physics_lookup: dict,
         max_length: int = 128,
     ):
         self.tokenizer      = tokenizer
@@ -38,6 +39,7 @@ class MolecularTripletDataset(Dataset):
             fpSize=2048,
         )
         self.triplets       = self._build_triplets(augmented_df)
+        self.physics = PhysicsLookup(physics_lookup, max_length)
 
     def _sample_background_negative(self, anchor_smiles: str, max_attempts: int = 50) -> str:
         """
@@ -92,57 +94,24 @@ class MolecularTripletDataset(Dataset):
         return triplets
 
     def _encode_one(self, smiles: str) -> dict[str, torch.Tensor]:
-        """
-        Full encoding pipeline for a single SMILES string.
-        Returns token_ids, P_electro, P_steric all at token resolution.
-        """
         T = self.max_length
 
-        # 1. Tokenize
         token_ids = torch.tensor(
             self.tokenizer.encode_smiles(smiles, max_length=T),
             dtype=torch.long
         )
 
-        # 2. Compute physicochemical matrices
-        mol = Chem.MolFromSmiles(smiles)
-
-        if mol is None:
-            # Return zero matrices for invalid SMILES — should not happen
-            # after sanitization in augmenter, but defensive coding matters
-            return {
-                'token_ids': token_ids,
-                'P_electro': torch.zeros(T, T),
-                'P_steric':  torch.zeros(T, T),
-            }
-
-        P_e_atom, P_s_atom = self.physics.compute_atom_matrices(mol)
-
-        # 3. Project atom-resolution matrices to token-resolution
-        atom_to_token = self.physics.build_atom_to_token_map(
-            smiles, token_ids.tolist(), self.tokenizer
+        # LOOKUP instead of recompute — the key speedup
+        P_e, P_s = self.physics.get(
+            smiles,
+            token_ids.tolist(),
+            self.tokenizer
         )
-
-        n_real_tokens = (token_ids != self.tokenizer.pad_token_id).sum().item()
-
-        P_e_token = self.physics.pool_to_token_space(
-            P_e_atom, atom_to_token, n_real_tokens
-        )
-        P_s_token = self.physics.pool_to_token_space(
-            P_s_atom, atom_to_token, n_real_tokens
-        )
-
-        # 4. Pad to max_length × max_length
-        P_e_padded = torch.zeros(T, T)
-        P_s_padded = torch.zeros(T, T)
-        n = min(n_real_tokens, T)
-        P_e_padded[:n, :n] = P_e_token[:n, :n]
-        P_s_padded[:n, :n] = P_s_token[:n, :n]
 
         return {
             'token_ids': token_ids,
-            'P_electro': P_e_padded,
-            'P_steric':  P_s_padded,
+            'P_electro': P_e,
+            'P_steric':  P_s,
         }
 
     def __len__(self):
@@ -167,3 +136,96 @@ class MolecularTripletDataset(Dataset):
             'hard_neg': self._encode_one(neg_smiles),
             'bg_neg':   self._encode_one(bg_smiles),
         }
+    
+
+
+
+    # In dataset.py — add this class
+
+class PhysicsLookup:
+    """
+    Wraps the precomputed physics lookup table.
+    Handles the atom-to-token projection at lookup time,
+    which must happen per SMILES variant (not precomputable).
+    """
+
+    def __init__(self, lookup: dict, max_length: int = 256):
+        self.lookup     = lookup
+        self.max_length = max_length
+
+    def get(
+        self,
+        smiles: str,
+        token_ids: list[int],
+        tokenizer,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Looks up precomputed atom-level matrices and projects to token space.
+        
+        The atom-level matrices are precomputed and cached.
+        The atom-to-token projection is computed here because it depends
+        on the specific SMILES variant's tokenization — not precomputable.
+        
+        Returns P_electro and P_steric at token resolution, padded to max_length.
+        """
+        T   = self.max_length
+        mol = Chem.MolFromSmiles(smiles)
+
+        # Look up by canonical SMILES
+        canonical = Chem.MolToSmiles(mol) if mol else None
+        entry     = self.lookup.get(canonical) if canonical else None
+
+        if entry is None:
+            # Molecule not in lookup — return zeros
+            # This should not happen if lookup was built from the same dataset
+            return torch.zeros(T, T), torch.zeros(T, T)
+
+        P_e_atom = entry['P_electro']   # [N_atoms, N_atoms]
+        P_s_atom = entry['P_steric']    # [N_atoms, N_atoms]
+        n_atoms  = entry['n_atoms']
+
+        # Project atom matrices to token space
+        # This must be done per SMILES variant because token alignment varies
+        P_e_token, P_s_token = self._project_to_token_space(
+            P_e_atom, P_s_atom, n_atoms, token_ids, T
+        )
+
+        return P_e_token, P_s_token
+
+    def _project_to_token_space(
+        self,
+        P_e_atom: torch.Tensor,
+        P_s_atom: torch.Tensor,
+        n_atoms: int,
+        token_ids: list[int],
+        T: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Projects atom-resolution matrices to token-resolution via
+        linear index scaling. Fast O(n_atoms^2) operation — no RDKit calls.
+        """
+        # Count real (non-padding) tokens
+        pad_id    = 1   # your pad_token_id
+        n_tokens  = sum(1 for t in token_ids if t != pad_id)
+        n_tokens  = max(n_tokens, 1)
+
+        P_e = torch.zeros(T, T)
+        P_s = torch.zeros(T, T)
+
+        if n_atoms == 0:
+            return P_e, P_s
+
+        # Linear scaling from atom indices to token indices
+        # This is an approximation — exact atom-to-token alignment
+        # requires offset mapping which is expensive at training time.
+        # Linear scaling is fast and sufficient for the physics signal.
+        scale = n_tokens / n_atoms
+
+        for i in range(n_atoms):
+            ti = min(int(i * scale), T - 1)
+            for j in range(n_atoms):
+                tj = min(int(j * scale), T - 1)
+                P_e[ti, tj] = P_e_atom[i, j]
+                P_s[ti, tj] = P_s_atom[i, j]
+
+        return P_e, P_s
