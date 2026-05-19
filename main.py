@@ -10,7 +10,7 @@ from train.dataset import MolecularTripletDataset
 from train.train import run_training , evaluate
 from model.config import load_model_config, TRAINING_CONFIG
 from dataPipeline.validate import validate_pipeline_data
-from dataPipeline.precompute_physics import build_physics_lookup
+from dataPipeline.precompute_physics import ExactPhysicsLookup
 
 
 
@@ -87,7 +87,7 @@ def build_or_load_data(force_rebuild: bool = False):
     # Build lookup from ALL data — augmented + canonical
     all_data = pd.concat([augmented_df, canonical_df], ignore_index=True)
     
-    physics_lookup = build_physics_lookup(
+    physics_lookup = ExactPhysicsLookup(
         df=all_data,
         smiles_col='smiles',
         cache_path='./cache/physics_lookup.pkl',

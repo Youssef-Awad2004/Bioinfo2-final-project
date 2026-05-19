@@ -40,7 +40,7 @@ class MolecularTripletDataset(Dataset):
             fpSize=2048,
         )
         self.triplets = self._build_triplets(augmented_df)
-        self.physics = ExactPhysicsLookup(physics_cache, max_length)
+        self.physics = ExactPhysicsLookup(physics_lookup, max_length)
 
     def _sample_background_negative(self, anchor_smiles: str, max_attempts: int = 50) -> str:
         """
