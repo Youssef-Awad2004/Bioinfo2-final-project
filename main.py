@@ -35,6 +35,7 @@ TRAIN_SPLIT = CACHE_DIR / "train.csv"
 VAL_SPLIT = CACHE_DIR / "val.csv"
 TEST_SPLIT = CACHE_DIR / "test.csv"
 PHYSICS_CACHE = CACHE_DIR / "physics_cache_exact.pkl"
+BEST_MODEL_PATH = CACHE_DIR / "ncaa_encoder_best.pt"
 
 
 def build_or_load_data(force_rebuild: bool = False):
@@ -45,13 +46,13 @@ def build_or_load_data(force_rebuild: bool = False):
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     if (not force_rebuild
-            and os.path.exists(TRAIN_SPLIT)
-            and os.path.exists(VAL_SPLIT)
-            and os.path.exists(TEST_SPLIT)):
+            and TRAIN_SPLIT.exists()
+            and VAL_SPLIT.exists()
+            and TEST_SPLIT.exists()):
         print("Loading cached splits...")
-        train_df = pd.read_csv(TRAIN_SPLIT)
-        val_df = pd.read_csv(VAL_SPLIT)
-        test_df = pd.read_csv(TEST_SPLIT)
+        train_df = pd.read_csv(str(TRAIN_SPLIT))
+        val_df = pd.read_csv(str(VAL_SPLIT))
+        test_df = pd.read_csv(str(TEST_SPLIT))
         all_data = pd.concat([train_df, val_df, test_df], ignore_index=True)
         return train_df, val_df, test_df, all_data
 
@@ -67,8 +68,8 @@ def build_or_load_data(force_rebuild: bool = False):
     # Match or exceed augmented target count for balanced in-batch negatives
     canonical_df  = fetch_canonical_baselines(limit=15000)
 
-    augmented_df.to_csv(AUGMENTED_CACHE, index=False)
-    canonical_df.to_csv(CANONICAL_CACHE, index=False)
+    augmented_df.to_csv(str(AUGMENTED_CACHE), index=False)
+    canonical_df.to_csv(str(CANONICAL_CACHE), index=False)
 
     # ── Diagnostic check ─────────────────────────────────────────────────
     print("\n=== DATA AUDIT ===")
@@ -133,9 +134,9 @@ def build_or_load_data(force_rebuild: bool = False):
     val_df   = get_split_df(val_ids,   augmented_df, canonical_df)
     test_df  = get_split_df(test_ids,  augmented_df, canonical_df)
 
-    train_df.to_csv(TRAIN_SPLIT, index=False)
-    val_df.to_csv(VAL_SPLIT,   index=False)
-    test_df.to_csv(TEST_SPLIT,  index=False)
+    train_df.to_csv(str(TRAIN_SPLIT), index=False)
+    val_df.to_csv(str(VAL_SPLIT),   index=False)
+    test_df.to_csv(str(TEST_SPLIT),  index=False)
 
     print(f"\nSplit sizes (anchor molecules):")
     print(f"  Train : {len(train_ids)} anchors -> {len(train_df)} total rows")
@@ -171,7 +172,7 @@ def main():
     physics_lookup = ExactPhysicsLookup(physics_cache, max_length=256)
 
     # ── Datasets ─────────────────────────────────────────────────────────
-    canonical_df = pd.read_csv(CANONICAL_CACHE)
+    canonical_df = pd.read_csv(str(CANONICAL_CACHE))
 
     train_dataset = MolecularTripletDataset(
         augmented_df=train_df,
@@ -203,6 +204,7 @@ def main():
         val_dataset=val_dataset,
         device=device,
         tokenizer_path=str(TOKENIZER_DIR),
+        best_model_path=str(BEST_MODEL_PATH),
     )
 
     # ── Final Test Evaluation ─────────────────────────────────────────────

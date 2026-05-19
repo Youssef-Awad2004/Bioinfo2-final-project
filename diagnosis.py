@@ -1,4 +1,6 @@
 # diagnosis.py
+import os
+from pathlib import Path
 import torch
 import torch.nn.functional as F
 import pandas as pd
@@ -6,7 +8,7 @@ from tokenizer.tokenizer import SmilesBPETokenizer
 from model.encoder import NcAATransformerEncoder
 from model.config import load_model_config
 
-def diagnose_collapse(model_path: str, tokenizer_path: str = "./ncaa_tokenizer"):
+def diagnose_collapse(model_path: str = None, tokenizer_path: str = None):
     """
     Tests whether the model has collapsed to geometric poles
     or learned genuine chemical representations.
@@ -21,6 +23,16 @@ def diagnose_collapse(model_path: str, tokenizer_path: str = "./ncaa_tokenizer")
       - Negatives: 0.1-0.4 similarity (different but not opposite)
       - Meaningful variance — different molecule pairs score differently
     """
+    # Resolve paths from env vars or defaults
+    if model_path is None:
+        PROJECT_DIR = Path(__file__).resolve().parent
+        KAGGLE_WORKING_DIR = Path("/kaggle/working")
+        DEFAULT_CACHE_DIR = KAGGLE_WORKING_DIR / "cache" if KAGGLE_WORKING_DIR.exists() else PROJECT_DIR / "cache"
+        model_path = str(Path(os.getenv("BIOINFO_CACHE_DIR", str(DEFAULT_CACHE_DIR))) / "ncaa_encoder_best.pt")
+    
+    if tokenizer_path is None:
+        PROJECT_DIR = Path(__file__).resolve().parent
+        tokenizer_path = str(Path(os.getenv("BIOINFO_TOKENIZER_DIR", str(PROJECT_DIR / "ncaa_tokenizer"))))
     device    = 'cuda' if torch.cuda.is_available() else 'cpu'
     tokenizer = SmilesBPETokenizer(pretrained_path=tokenizer_path)
     config    = load_model_config(tokenizer_path)
@@ -149,4 +161,4 @@ def diagnose_collapse(model_path: str, tokenizer_path: str = "./ncaa_tokenizer")
 
 
 if __name__ == "__main__":
-    diagnose_collapse("ncaa_encoder_best.pt")
+    diagnose_collapse()

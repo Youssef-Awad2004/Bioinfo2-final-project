@@ -159,12 +159,18 @@ class SmilesBPETokenizer:
         self,
         df: pd.DataFrame,
         smiles_col: str = 'smiles',
-        save_path: str = "./ncaa_tokenizer"
+        save_path: str = None
     ):
         """
         Runs Phase 2 (corpus-driven expansion) and saves.
         Phase 1 already ran in __init__.
         """
+        if save_path is None:
+            import os
+            from pathlib import Path
+            PROJECT_DIR = Path(__file__).resolve().parent.parent
+            save_path = str(Path(os.getenv("BIOINFO_TOKENIZER_DIR", str(PROJECT_DIR / "ncaa_tokenizer"))))
+        
         smiles_list = df[smiles_col].dropna().tolist()
         self._apply_phase2_tokens(smiles_list)
 

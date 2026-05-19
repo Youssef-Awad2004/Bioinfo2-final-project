@@ -1,5 +1,7 @@
 # smoke_test.py - full corrected version
 
+import os
+from pathlib import Path
 import torch
 from tokenizer.tokenizer import SmilesBPETokenizer
 from model.encoder import NcAATransformerEncoder
@@ -8,7 +10,11 @@ from train.loss import AnnealedInfoNCE
 from model.config import load_model_config, TRAINING_CONFIG
 
 
-def run_smoke_test():
+def run_smoke_test(tokenizer_path: str = None):
+    if tokenizer_path is None:
+        PROJECT_DIR = Path(__file__).resolve().parent
+        tokenizer_path = str(Path(os.getenv("BIOINFO_TOKENIZER_DIR", str(PROJECT_DIR / "ncaa_tokenizer"))))
+    
     print("=== SMOKE TEST ===\n")
 
     # ── Device check ────────────────────────────────────────────────────
@@ -22,11 +28,11 @@ def run_smoke_test():
 
     # ── 1. Tokenizer ────────────────────────────────────────────────────
     print("[1/5] Loading tokenizer...")
-    tokenizer  = SmilesBPETokenizer(pretrained_path="./ncaa_tokenizer")
+    tokenizer  = SmilesBPETokenizer(pretrained_path=tokenizer_path)
     
     # -- 2. Config - read from tokenizer, not hardcoded ----
     print("[2/5] Loading model config from tokenizer...")
-    MODEL_CONFIG = load_model_config("./ncaa_tokenizer")
+    MODEL_CONFIG = load_model_config(tokenizer_path)
     
     print(f"     vocab_size   : {MODEL_CONFIG['vocab_size']}")
     print(f"     pad_token_id : {MODEL_CONFIG['pad_token_id']}")

@@ -221,7 +221,8 @@ def evaluate(model, dataset, device, label="VAL") -> dict:
     return results
 
 def run_training(train_dataset, val_dataset, device='cpu',
-                 tokenizer_path="./ncaa_tokenizer"):
+                 tokenizer_path="./ncaa_tokenizer",
+                 best_model_path="ncaa_encoder_best.pt"):
     model_config = load_model_config(tokenizer_path)
     model_config['max_seq_len'] = 256
 
@@ -289,8 +290,9 @@ def run_training(train_dataset, val_dataset, device='cpu',
                 best_gap    = gap
                 best_epoch  = epoch + 1
                 patience_count = 0
-                torch.save(model.state_dict(), "ncaa_encoder_best.pt")
-                print(f"  💾 New best saved (gap={best_gap:.4f})")
+                os.makedirs(os.path.dirname(best_model_path) or '.', exist_ok=True)
+                torch.save(model.state_dict(), best_model_path)
+                print(f"  💾 New best saved to {best_model_path} (gap={best_gap:.4f})")
             else:
                 patience_count += 1
                 print(f"  No improvement ({patience_count}/{patience})")
@@ -303,9 +305,8 @@ def run_training(train_dataset, val_dataset, device='cpu',
     print(f"\nTraining complete. Best epoch: {best_epoch}, gap={best_gap:.4f}")
 
     # Load best weights before returning
-    import os
-    if os.path.exists("ncaa_encoder_best.pt"):
-        model.load_state_dict(torch.load("ncaa_encoder_best.pt"))
-        print("Loaded best model weights")
+    if os.path.exists(str(best_model_path)):
+        model.load_state_dict(torch.load(str(best_model_path), map_location=device))
+        print(f"Loaded best model weights from {best_model_path}")
 
     return model

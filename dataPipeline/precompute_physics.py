@@ -574,26 +574,34 @@ def validate_cache(cache: dict, tokenizer, test_cases: dict = None):
 
 if __name__ == "__main__":
     import sys, os
+    from pathlib import Path
     ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     if ROOT not in sys.path:
         sys.path.insert(0, ROOT)
 
     from tokenizer.tokenizer import SmilesBPETokenizer
 
+    # Kaggle-compatible paths
+    PROJECT_DIR = Path(ROOT)
+    KAGGLE_WORKING_DIR = Path("/kaggle/working")
+    DEFAULT_CACHE_DIR = KAGGLE_WORKING_DIR / "cache" if KAGGLE_WORKING_DIR.exists() else PROJECT_DIR / "cache"
+    CACHE_DIR = Path(os.getenv("BIOINFO_CACHE_DIR", str(DEFAULT_CACHE_DIR)))
+    TOKENIZER_DIR = Path(os.getenv("BIOINFO_TOKENIZER_DIR", str(PROJECT_DIR / "ncaa_tokenizer")))
+
     print("Loading tokenizer...")
-    tokenizer = SmilesBPETokenizer(pretrained_path="./ncaa_tokenizer")
+    tokenizer = SmilesBPETokenizer(pretrained_path=str(TOKENIZER_DIR))
     tok       = tokenizer.tokenizer   # the underlying HuggingFace tokenizer
 
     print("Loading dataframes...")
-    augmented_df = pd.read_csv("./cache/augmented_targets.csv")
-    canonical_df = pd.read_csv("./cache/canonical_baselines.csv")
+    augmented_df = pd.read_csv(str(CACHE_DIR / "augmented_targets.csv"))
+    canonical_df = pd.read_csv(str(CACHE_DIR / "canonical_baselines.csv"))
     all_data     = pd.concat([augmented_df, canonical_df], ignore_index=True)
 
     cache = build_exact_physics_cache(
         df=all_data,
         tokenizer=tok,
         max_length=256,
-        cache_path="./cache/physics_cache_exact.pkl",
+        cache_path=str(CACHE_DIR / "physics_cache_exact.pkl"),
         force_rebuild=False,
     )
 

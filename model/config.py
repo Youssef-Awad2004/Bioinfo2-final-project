@@ -1,6 +1,12 @@
 # model/config.py
+import os
+from pathlib import Path
 
-def load_model_config(tokenizer_path: str = "./ncaa_tokenizer") -> dict:
+def load_model_config(tokenizer_path: str = None) -> dict:
+    if tokenizer_path is None:
+        PROJECT_DIR = Path(__file__).resolve().parent.parent
+        tokenizer_path = str(Path(os.getenv("BIOINFO_TOKENIZER_DIR", str(PROJECT_DIR / "ncaa_tokenizer"))))
+    
     from transformers import RobertaTokenizerFast
     tok = RobertaTokenizerFast.from_pretrained(tokenizer_path)
     

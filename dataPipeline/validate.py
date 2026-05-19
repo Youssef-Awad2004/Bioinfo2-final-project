@@ -428,14 +428,21 @@ def validate_pipeline_data(
 
 if __name__ == "__main__":
     import os, sys
+    from pathlib import Path
     ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     if ROOT not in sys.path:
         sys.path.insert(0, ROOT)
 
     print("Loading cached data...")
     try:
-        augmented_df = pd.read_csv("./cache/augmented_targets.csv")
-        canonical_df = pd.read_csv("./cache/canonical_baselines.csv")
+        # Kaggle-compatible paths
+        PROJECT_DIR = Path(ROOT)
+        KAGGLE_WORKING_DIR = Path("/kaggle/working")
+        DEFAULT_CACHE_DIR = KAGGLE_WORKING_DIR / "cache" if KAGGLE_WORKING_DIR.exists() else PROJECT_DIR / "cache"
+        cache_dir = Path(os.getenv("BIOINFO_CACHE_DIR", str(DEFAULT_CACHE_DIR)))
+        
+        augmented_df = pd.read_csv(str(cache_dir / "augmented_targets.csv"))
+        canonical_df = pd.read_csv(str(cache_dir / "canonical_baselines.csv"))
         print(f"  augmented_targets : {len(augmented_df)} rows")
         print(f"  canonical_baselines: {len(canonical_df)} rows")
         print(f"  type distribution:")
