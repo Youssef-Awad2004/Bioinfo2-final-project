@@ -157,7 +157,7 @@ def evaluate(model, dataset, device, label="VAL") -> dict:
         batch_size=8,
         shuffle=False,
         drop_last=False,
-        num_workers=0,
+        num_workers=4,
         collate_fn=collate_triplets,
     )
 
@@ -252,7 +252,7 @@ def run_training(train_dataset, val_dataset, device='cpu',
         batch_size=TRAINING_CONFIG['batch_size'],
         shuffle=True,
         drop_last=True,
-        num_workers=8,        # Use multiple CPU cores to build batches simultaneously!
+        num_workers=4,        # Use multiple CPU cores to build batches simultaneously!
         pin_memory=True,
         collate_fn=collate_triplets,
     )
