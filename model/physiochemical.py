@@ -36,6 +36,12 @@ class PhysicochemicalBiasComputer(nn.Module):
     }
     DEFAULT_VDW = 1.70  # fallback for unlisted elements
 
+    def safe_normalize(matrix):
+        abs_max = matrix.abs().max()
+        if abs_max > 1e-6:
+            return matrix / abs_max
+        return matrix
+
     def compute_atom_matrices(
         self, mol
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -69,7 +75,7 @@ class PhysicochemicalBiasComputer(nn.Module):
         # Pairwise radius sum — encodes steric clash potential
         P_steric  = radii.unsqueeze(1) + radii.unsqueeze(0)      # [N, N]
 
-        return P_electro, P_steric
+        return self.safe_normalize(P_electro), self.safe_normalize(P_steric)
 
     def pool_to_token_space(
         self,

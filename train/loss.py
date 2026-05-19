@@ -66,7 +66,7 @@ class AnnealedInfoNCE(nn.Module):
         sim_all = torch.cat([sim_positive.unsqueeze(-1), sim_negatives], dim=-1)
         # InfoNCE: -log( exp(sim_pos) / sum(exp(sim_all)) )
         # Numerically stable via logsumexp
-        oss = -sim_positive + torch.logsumexp(sim_all, dim=-1)l
+        loss = -sim_positive + torch.logsumexp(sim_all, dim=-1)
         loss = loss.mean()
 
         # Diagnostic metrics — track these during training

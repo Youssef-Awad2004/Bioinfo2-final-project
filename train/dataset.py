@@ -9,6 +9,7 @@ if ROOT_DIR not in sys.path:
 import torch
 from torch.utils.data import Dataset
 from rdkit import Chem
+from rdkit.Chem import DataStructs, rdFingerprintGenerator
 from model.physiochemical import PhysicochemicalBiasComputer
 
 
@@ -32,7 +33,42 @@ class MolecularTripletDataset(Dataset):
         self.max_length     = max_length
         self.physics        = PhysicochemicalBiasComputer()
         self.canonical_pool = canonical_df['smiles'].dropna().tolist()
+        self._morgan_generator = rdFingerprintGenerator.GetMorganGenerator(
+            radius=2,
+            fpSize=2048,
+        )
         self.triplets       = self._build_triplets(augmented_df)
+
+    def _sample_background_negative(self, anchor_smiles: str, max_attempts: int = 50) -> str:
+        """
+        Sample a canonical baseline that stays chemically distant from the anchor.
+
+        Rejects candidates with Tanimoto similarity > 0.6 against the anchor.
+        Falls back to the last sampled canonical if no distant candidate is found.
+        """
+        anchor_mol = Chem.MolFromSmiles(anchor_smiles)
+        if anchor_mol is None or not self.canonical_pool:
+            return anchor_smiles
+
+        anchor_fp = self._morgan_generator.GetFingerprint(anchor_mol)
+        chosen_smiles = self.canonical_pool[0]
+
+        for _ in range(max_attempts):
+            candidate_smiles = self.canonical_pool[
+                torch.randint(len(self.canonical_pool), (1,)).item()
+            ]
+            candidate_mol = Chem.MolFromSmiles(candidate_smiles)
+            if candidate_mol is None:
+                continue
+
+            candidate_fp = self._morgan_generator.GetFingerprint(candidate_mol)
+            tanimoto = DataStructs.TanimotoSimilarity(anchor_fp, candidate_fp)
+            chosen_smiles = candidate_smiles
+
+            if tanimoto <= 0.6:
+                return candidate_smiles
+
+        return chosen_smiles
 
     def _build_triplets(self, df):
         anchors   = df[df['type'] == 'noncanonical_target']
@@ -123,9 +159,7 @@ class MolecularTripletDataset(Dataset):
         neg_smiles = triplet['negative'][
             torch.randint(len(triplet['negative']), (1,)).item()
         ]
-        bg_smiles = self.canonical_pool[
-            torch.randint(len(self.canonical_pool), (1,)).item()
-        ]
+        bg_smiles = self._sample_background_negative(triplet['anchor'])
 
         return {
             'anchor':   self._encode_one(triplet['anchor']),

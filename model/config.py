@@ -20,7 +20,7 @@ TRAINING_CONFIG = {
     'lr':             1e-5,
     'weight_decay':   0.05,
     'tau_max':        0.5,
-    'tau_min':        0.07,
+    'tau_min':        0.1,
     'anneal_steps':   10000,
     'batch_size':     16,         # ← reduced from 32, 768-dim uses more memory
     'epochs':         50,

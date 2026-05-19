@@ -78,7 +78,9 @@ def train_epoch(model, loader, optimizer, loss_fn, device):
         loss, metrics = loss_fn(z_a, z_p, z_hn, z_bg)
         loss.backward()
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        if grad_norm > 1.0:
+            print(f" Gradient clipped: {grad_norm:.2f} → 1.0")
         optimizer.step()
 
         total_loss  += metrics['loss']
