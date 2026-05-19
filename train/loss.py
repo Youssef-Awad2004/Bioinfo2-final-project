@@ -61,11 +61,12 @@ class AnnealedInfoNCE(nn.Module):
         # All negative similarities: anchor · each negative [B, 2B]
         # Stack hard negatives and background negatives as denominator
         negatives = torch.cat([z_hn, z_bg], dim=0)  # [2B, D]
-        sim_all = torch.matmul(z_a, negatives.T) / tau  # [B, 2B]
+        sim_negatives = torch.matmul(z_a, negatives.T) / tau  # [B, 2B]
 
+        sim_all = torch.cat([sim_positive.unsqueeze(-1), sim_negatives], dim=-1)
         # InfoNCE: -log( exp(sim_pos) / sum(exp(sim_all)) )
         # Numerically stable via logsumexp
-        loss = -sim_positive + torch.logsumexp(sim_all, dim=-1)
+        oss = -sim_positive + torch.logsumexp(sim_all, dim=-1)l
         loss = loss.mean()
 
         # Diagnostic metrics — track these during training

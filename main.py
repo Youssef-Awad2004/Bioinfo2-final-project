@@ -41,14 +41,14 @@ def build_or_load_data(force_rebuild: bool = False):
     # ── Fetch ────────────────────────────────────────────────────────────
     print("[1/4] Ingesting ChEMBL peptides...")
     # Pull more - augmentation will expand this
-    raw_target_df = fetch_chembl_peptides(limit=1000)
+    raw_target_df = fetch_chembl_peptides(limit=15000)
 
     print("[2/4] Augmenting targets...")
     augmented_df  = run_augmentation_pipeline(raw_target_df, pos_factor=5)
 
     print("[3/4] Ingesting UniProt canonicals...")
     # Match or exceed augmented target count for balanced in-batch negatives
-    canonical_df  = fetch_canonical_baselines(limit=500)
+    canonical_df  = fetch_canonical_baselines(limit=15000)
 
     augmented_df.to_csv(AUGMENTED_CACHE, index=False)
     canonical_df.to_csv(CANONICAL_CACHE, index=False)
