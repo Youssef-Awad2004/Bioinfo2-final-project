@@ -47,6 +47,7 @@ import pandas as pd
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from typing import Optional
+import hashlib
 
 
 # ── Verified Pauling electronegativities ────────────────────────────────────
@@ -351,14 +352,16 @@ def build_exact_physics_cache(
     smiles_col:   str  = 'smiles',
     cache_path:   str  = './cache/physics_cache_exact.pkl',
     force_rebuild: bool = False,
-) -> dict:
+) -> tuple[dict, str]:
     """
-    Builds the complete physics cache for ALL SMILES strings in df.
+    Builds or updates a disk-backed physics cache for all SMILES in df.
 
-    Each entry is keyed by the SMILES string itself (not canonical).
-    Value is a dict with:
-        'P_electro': torch.Tensor [max_length, max_length] float16
-        'P_steric':  torch.Tensor [max_length, max_length] float16
+    Each SMILES is saved as its own .pt file on disk.
+    cache_path points to a small index pickle mapping:
+        SMILES -> filename.pt
+
+    If cache_path exists and force_rebuild is False, the index is loaded
+    and any existing tensor files are skipped.
 
     Zero RDKit calls will be needed during training.
     Zero approximation in the atom-to-token mapping.
@@ -368,32 +371,43 @@ def build_exact_physics_cache(
     Sparse storage (only real token block) reduces to ~2-4 GB.
 
     This function stores the full padded matrices for simplicity.
-    If storage is a concern, see the sparse variant below.
     """
+    base_dir = os.path.dirname(cache_path) if os.path.dirname(cache_path) else '.'
+    tensor_dir = os.path.join(base_dir, "physics_tensors")
+    os.makedirs(tensor_dir, exist_ok=True)
+
+    index_cache = {}
     if not force_rebuild and os.path.exists(cache_path):
-        print(f"Loading exact physics cache from {cache_path}...")
+        print(f"Loading physics index from {cache_path}...")
         with open(cache_path, 'rb') as f:
-            cache = pickle.load(f)
-        print(f"Loaded {len(cache)} SMILES entries")
-        return cache
+            index_cache = pickle.load(f)
+        print(f"Loaded {len(index_cache)} index entries")
 
     smiles_list = df[smiles_col].dropna().unique().tolist()
     total       = len(smiles_list)
-    print(f"Building exact physics cache for {total} unique SMILES strings...")
-    print(f"This runs once. Zero RDKit calls during training after this.\n")
+    print(f"Streaming exact physics to disk for {total} unique SMILES strings...")
+    print(f"Index: {cache_path}")
+    print(f"Tensors: {tensor_dir}\n")
 
-    cache   = {}
-    failed  = []
-    skipped = 0
+    failed = []
+    skipped_existing = 0
+    written = 0
 
     for i, smiles in enumerate(smiles_list):
         if i % 5000 == 0:
             print(f"  {i:6d}/{total} ({100*i/total:.1f}%)  "
-                  f"cached={len(cache)}  failed={len(failed)}")
+                  f"written={written}  skipped={skipped_existing}  failed={len(failed)}")
 
-        # Skip if already cached (deduplication)
-        if smiles in cache:
-            skipped += 1
+        # Hash to a stable filename per SMILES
+        file_hash = hashlib.md5(smiles.encode('utf-8')).hexdigest()
+        filename = f"{file_hash}.pt"
+        filepath = os.path.join(tensor_dir, filename)
+
+        # Skip if already on disk (resume support)
+        if not force_rebuild and os.path.exists(filepath):
+            if index_cache.get(smiles) != filename:
+                index_cache[smiles] = filename
+            skipped_existing += 1
             continue
 
         # Parse molecule
@@ -441,14 +455,17 @@ def build_exact_physics_cache(
             charges, radii, atom_to_token, n_tokens, max_length
         )
 
-        cache[smiles] = {
+        torch.save({
             'P_electro': P_e,   # [max_length, max_length] float16
             'P_steric':  P_s,   # [max_length, max_length] float16
-        }
+        }, filepath)
+
+        index_cache[smiles] = filename
+        written += 1
 
     print(f"\nPrecomputation complete:")
-    print(f"  Cached  : {len(cache)}")
-    print(f"  Skipped : {skipped} (duplicates)")
+    print(f"  Written : {written}")
+    print(f"  Skipped : {skipped_existing} (already on disk)")
     print(f"  Failed  : {len(failed)}")
 
     if failed:
@@ -456,41 +473,32 @@ def build_exact_physics_cache(
         for smi, reason in failed[:5]:
             print(f"    {smi[:50]}: {reason}")
 
-    # Estimate storage
-    if cache:
-        sample  = next(iter(cache.values()))
-        bytes_per_entry = (
-            sample['P_electro'].nelement() * 2 +   # float16 = 2 bytes
-            sample['P_steric'].nelement()  * 2
-        )
-        total_gb = len(cache) * bytes_per_entry / 1e9
-        print(f"\n  Estimated storage: {total_gb:.2f} GB")
-
-    os.makedirs(os.path.dirname(cache_path) if os.path.dirname(cache_path) else '.', exist_ok=True)
+    os.makedirs(base_dir, exist_ok=True)
     with open(cache_path, 'wb') as f:
-        pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
-    print(f"  Saved to {cache_path}")
+        pickle.dump(index_cache, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"  Saved index to {cache_path}")
 
-    return cache
+    return index_cache, tensor_dir
 
 
 # ── Step 5: Dataset integration ──────────────────────────────────────────────
 
 class ExactPhysicsLookup:
     """
-    Drop-in replacement for PhysicsLookup and PhysicochemicalBiasComputer.
+    Disk-backed lookup for exact physics tensors.
 
     Training loop usage:
         P_e, P_s = physics_lookup.get(smiles)
 
-    Zero RDKit calls. Zero approximation. Pure dictionary lookup.
+    Zero RDKit calls. Zero approximation. Disk streaming lookup.
     """
 
-    def __init__(self, cache: dict, max_length: int = 256):
-        self.cache      = cache
-        self.max_length = max_length
-        self._zeros_e   = torch.zeros(max_length, max_length)
-        self._zeros_s   = torch.zeros(max_length, max_length)
+    def __init__(self, index_cache: dict, tensor_dir: str, max_length: int = 256):
+        self.index_cache = index_cache
+        self.tensor_dir  = tensor_dir
+        self.max_length  = max_length
+        self._zeros_e    = torch.zeros(max_length, max_length)
+        self._zeros_s    = torch.zeros(max_length, max_length)
 
     def get(self, smiles: str) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -498,20 +506,26 @@ class ExactPhysicsLookup:
         Falls back to zero matrices if SMILES not in cache.
         Zero matrices mean no physics bias — model falls back to pure attention.
         """
-        entry = self.cache.get(smiles)
-        if entry is None:
+        filename = self.index_cache.get(smiles)
+        if filename is None:
             return self._zeros_e, self._zeros_s
 
-        # Return as float32 — model expects float32
-        return (
-            entry['P_electro'].float(),
-            entry['P_steric'].float(),
-        )
+        filepath = os.path.join(self.tensor_dir, filename)
+        try:
+            try:
+                data = torch.load(filepath, weights_only=True)
+            except TypeError:
+                data = torch.load(filepath)
+
+            # Return as float32 — model expects float32
+            return data['P_electro'].float(), data['P_steric'].float()
+        except Exception:
+            return self._zeros_e, self._zeros_s
 
 
 # ── Step 6: Validation ───────────────────────────────────────────────────────
 
-def validate_cache(cache: dict, tokenizer, test_cases: dict = None):
+def validate_cache(index_cache: dict, tensor_dir: str, tokenizer, max_length: int = 256, test_cases: dict = None):
     """
     Validates the cache against known molecules.
     Checks that:
@@ -529,19 +543,18 @@ def validate_cache(cache: dict, tokenizer, test_cases: dict = None):
             'Glycine':        'NCC(=O)O',
         }
 
+    lookup = ExactPhysicsLookup(index_cache, tensor_dir, max_length=max_length)
+
     print("\n=== CACHE VALIDATION ===")
     all_passed = True
 
     for name, smiles in test_cases.items():
-        entry = cache.get(smiles)
-
-        if entry is None:
+        if smiles not in index_cache:
             print(f"  ❌ {name}: NOT IN CACHE")
             all_passed = False
             continue
 
-        P_e = entry['P_electro'].float()
-        P_s = entry['P_steric'].float()
+        P_e, P_s = lookup.get(smiles)
 
         e_max = P_e.abs().max().item()
         s_max = P_s.abs().max().item()
@@ -597,7 +610,7 @@ if __name__ == "__main__":
     canonical_df = pd.read_csv(str(CACHE_DIR / "canonical_baselines.csv"))
     all_data     = pd.concat([augmented_df, canonical_df], ignore_index=True)
 
-    cache = build_exact_physics_cache(
+    index_cache, tensor_dir = build_exact_physics_cache(
         df=all_data,
         tokenizer=tok,
         max_length=256,
@@ -605,4 +618,4 @@ if __name__ == "__main__":
         force_rebuild=False,
     )
 
-    validate_cache(cache, tok)
+    validate_cache(index_cache, tensor_dir, tok, max_length=256)
